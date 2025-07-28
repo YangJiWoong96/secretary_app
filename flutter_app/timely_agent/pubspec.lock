@@ -369,7 +369,7 @@ packages:
     source: hosted
     version: "2.1.8"
   shared_preferences:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: shared_preferences
       sha256: "6e8bf70b7fef813df4e9a36f658ac46d107db4b4cfe1048b477d4e453a8159f5"
@@ -429,6 +429,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  sleek_circular_slider:
+    dependency: "direct main"
+    description:
+      name: sleek_circular_slider
+      sha256: "89c7d0d37befc9818a2b53ef6ff126c43b70485dabb189b734d46106db190931"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.0"
   source_span:
     dependency: transitive
     description:
@@ -486,7 +494,7 @@ packages:
     source: hosted
     version: "0.7.4"
   timezone:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: timezone
       sha256: "2236ec079a174ce07434e89fcd3fcda430025eb7692244139a9cf54fdcf1fc7d"

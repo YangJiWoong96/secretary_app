@@ -41,7 +41,8 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+# Gradle 캐시
+/android/.gradle/
+
+# Android Studio 모듈 파일
+/android/*.iml

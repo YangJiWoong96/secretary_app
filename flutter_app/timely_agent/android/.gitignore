@@ -1,5 +1,4 @@
 gradle-wrapper.jar
-/.gradle
 /captures/
 /gradlew
 /gradlew.bat
@@ -12,3 +11,7 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Android 빌드 아티팩트
+/android/build/
+/android/app/build/
