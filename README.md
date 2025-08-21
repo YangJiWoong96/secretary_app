@@ -3,6 +3,7 @@
 
 ###  Flutter 기반 애플리케이션 
 
+* public 제한 예정 
 * RAG(Milvus -HNSW) Redis를 장/단기 메모리로 구현 
 * 에이전트를 활용한 Operating in the Giant's Blind Spot
 * 최종적으로는 Kubernetes (Helm chart) + AWS EC2 환경에 배포 예정
