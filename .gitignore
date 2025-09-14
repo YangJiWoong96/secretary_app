@@ -1,0 +1,8 @@
+# 최상위 폴더에서... 
+# 보안: 비밀 키와 환경 변수 파일을 Git 추적에서 제외
+.env
+*.json
+venv/
+my_business/models/
+my_business/naver-search-mcp/
+my_business/download_EmbeddingModels.py

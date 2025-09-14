@@ -1,0 +1,6 @@
+# 보안: 비밀 키와 환경 변수 파일을 Git 추적에서 제외
+.env
+*.json
+venv/
+router_kor_electra_small/
+test/
