@@ -311,7 +311,9 @@ async def events_push_open(payload: Dict[str, Any]):
 async def internal_rag_retrieve(payload: Dict[str, Any]):
     """RAG 검색 내부 엔드포인트"""
     try:
-        sid = str(payload.get("session_id") or "").strip()
+        uid = str(payload.get("user_id") or "").strip()
+        if not uid:
+            raise ValueError("user_id is required")
         q = str(payload.get("query") or "").strip()
         top_k = int(payload.get("top_k") or 2)
         df = payload.get("date_filter")
@@ -321,7 +323,7 @@ async def internal_rag_retrieve(payload: Dict[str, Any]):
             else None
         )
 
-        blocks = retrieve_from_rag(sid, q, top_k=top_k, date_filter=date_filter)
+        blocks = retrieve_from_rag(uid, q, top_k=top_k, date_filter=date_filter)
         return {"blocks": blocks or ""}
     except Exception as e:
         log_event(
@@ -356,6 +358,9 @@ async def internal_evidence_bundle(payload: Dict[str, Any]):
     """증거 번들 내부 엔드포인트"""
     try:
         sid = str(payload.get("session_id") or "").strip()
+        uid = str(payload.get("user_id") or "").strip()
+        if not uid:
+            raise ValueError("user_id is required")
         q = str(payload.get("query") or "").strip()
         web_on = bool(payload.get("web_on", True))
         rag_on = bool(payload.get("rag_on", True))
@@ -419,7 +424,7 @@ async def internal_evidence_bundle(payload: Dict[str, Any]):
             if rag_on and rag_query:
                 try:
                     rag_ctx_local = retrieve_from_rag(
-                        sid, rag_query, top_k=3, date_filter=rag_date_filter
+                        uid, rag_query, top_k=3, date_filter=rag_date_filter
                     )
                     # RAG 블록 정규화(3줄 블록): builder.py와 동일 규칙 적용
                     parts = (rag_ctx_local or "").split("\n\n")
@@ -878,7 +883,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, session_id: str
                     retrieve_enhanced(
                         query=rag_query_text,
                         route="rag",
-                        session_id=session_id,
+                        user_id=user_id,
                         top_k=5,
                         date_filter=rag_date_filter,
                     )
@@ -894,7 +899,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, session_id: str
                     retrieve_enhanced(
                         query=web_query,
                         route="web",
-                        session_id=session_id,
+                        user_id=user_id,
                         top_k=5,
                     )
                 )
@@ -931,7 +936,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, session_id: str
                 if WEATHER_HINT:
                     weather_task = asyncio.create_task(
                         retrieve_enhanced(
-                            query=user_input, route="weather", session_id=session_id
+                            query=user_input, route="weather", user_id=user_id
                         )
                     )
             except Exception as e:
@@ -1697,10 +1702,10 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, session_id: str
                 rag_ctx_for_refs if "rag_ctx_for_refs" in locals() else rag_ctx
             ).strip():
 
-                async def _store_refs_bg(_sid: str, _w: str, _r: str) -> None:
+                async def _store_refs_bg(_uid: str, _w: str, _r: str) -> None:
                     try:
                         # 동기 I/O는 to_thread로 비차단 처리
-                        await asyncio.to_thread(store_refs_from_contexts, _sid, _w, _r)
+                        await asyncio.to_thread(store_refs_from_contexts, _uid, _w, _r)
                         try:
                             log_event(
                                 "refs_stored",
@@ -1719,7 +1724,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, session_id: str
 
                 _w_val = web_ctx_for_refs if "web_ctx_for_refs" in locals() else web_ctx
                 _r_val = rag_ctx_for_refs if "rag_ctx_for_refs" in locals() else rag_ctx
-                asyncio.create_task(_store_refs_bg(session_id, _w_val, _r_val))
+                asyncio.create_task(_store_refs_bg(user_id, _w_val, _r_val))
 
             # ===== 증거 피드백 감지 및 저장 =====
             try:
@@ -1742,11 +1747,14 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, session_id: str
                         ai_output=full_answer,
                         prev_rag_ctx=prev_rag,
                         prev_web_ctx=prev_web,
+                        user_id=user_id,
                         session_id=session_id,
                         turn_id=turn_id,
                     )
                     # 피드백 기반 pending 증거 평가 (Delayed Archival)
-                    await evaluate_with_feedback(session_id, turn_id, feedbacks)
+                    await evaluate_with_feedback(
+                        user_id, session_id, turn_id, feedbacks
+                    )
                     for fb in feedbacks:
                         original = prev_rag if fb.evidence_type == "rag" else prev_web
                         asyncio.create_task(
@@ -1815,6 +1823,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, session_id: str
                             if should_save:
                                 user_ctx = f"질문: {user_input[:200]}\n답변: {full_answer[:200]}"
                                 await enqueue_pending_evidence(
+                                    user_id=user_id,
                                     session_id=session_id,
                                     turn_id=turn_id,
                                     web_ctx=current_web,
@@ -1853,35 +1862,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, session_id: str
         except Exception:
             pass
         # 최종 스냅샷 예약
-        enqueue_snapshot(session_id)
+        enqueue_snapshot(user_id, session_id)
         schedule_directive_update(session_id, force=True)
-
-
-# 레거시 경로 호환: /ws/{session_id}
-@app.websocket("/ws/{session_id}")
-@traceable(
-    name="App: websocket_session_legacy", run_type="chain", tags=["app", "ws", "legacy"]
-)
-async def websocket_endpoint_legacy(websocket: WebSocket, session_id: str):
-    """
-    레거시 WS 엔드포인트.
-    - 구버전 클라이언트 호환용. user_id를 session_id로 간주하여 신규 핸들러로 위임합니다.
-    - 수락(accept)은 신규 핸들러에서 수행합니다.
-    """
-    try:
-        map_session_to_user(session_id, session_id)
-        safe_log_event(
-            "ws_legacy_accept", {"session_id": session_id, "user_id": session_id}
-        )
-    except Exception as e:
-        try:
-            safe_log_event(
-                "ws_legacy_accept_error",
-                {"session_id": session_id, "user_id": session_id, "error": str(e)},
-            )
-        except Exception:
-            pass
-    return await websocket_endpoint(websocket, session_id, session_id)
 
 
 @app.on_event("shutdown")

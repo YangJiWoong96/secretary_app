@@ -112,28 +112,28 @@ class GlobalState:
         """사용자 프로필 DB"""
         return self._profile_db
 
-    def get_profile(self, session_id: str) -> Dict:
+    def get_profile(self, user_id: str) -> Dict:
         """
         사용자 프로필 가져오기
 
         Args:
-            session_id: 세션 ID
+            user_id: 사용자 ID
 
         Returns:
             Dict: 사용자 프로필 (없으면 빈 딕셔너리)
         """
-        return self._profile_db.get(session_id, {})
+        return self._profile_db.get(user_id, {})
 
-    def set_profile(self, session_id: str, profile: Dict) -> None:
+    def set_profile(self, user_id: str, profile: Dict) -> None:
         """
         사용자 프로필 설정
 
         Args:
-            session_id: 세션 ID
+            user_id: 사용자 ID
             profile: 프로필 딕셔너리
         """
         with self._lock:
-            self._profile_db[session_id] = profile
+            self._profile_db[user_id] = profile
 
 
 # ===== 싱글톤 인스턴스 =====

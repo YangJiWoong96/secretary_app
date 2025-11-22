@@ -37,7 +37,7 @@ async def store_feedback_enhanced_evidence(
         emb = embed_query_openai(enriched_text)
         now = now_kst()
         doc_id = (
-            f"{feedback.session_id}:feedback:{feedback.evidence_id}:{feedback.turn_id}"
+            f"{feedback.user_id}:feedback:{feedback.evidence_id}:{feedback.turn_id}"
         )
 
         # Milvus log 스키마 비호환 필드(text에 메타 보존)
@@ -54,7 +54,7 @@ async def store_feedback_enhanced_evidence(
                     "id": doc_id,
                     "embedding": emb,
                     "text": safe_text,
-                    "user_id": feedback.session_id,
+                    "user_id": feedback.user_id,
                     "type": "evidence_feedback",
                     "created_at": int(time.time_ns()),
                     "date_start": ymd(now),
@@ -81,7 +81,7 @@ async def store_feedback_enhanced_evidence(
             safe_log_event(
                 "rag.log_upsert",
                 {
-                    "user_id": feedback.session_id,
+                    "user_id": feedback.user_id,
                     "collection": "logs",
                     "chunk_count": 1,
                     "vector_dim": len(emb or []),

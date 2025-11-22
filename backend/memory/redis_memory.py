@@ -178,7 +178,16 @@ class HybridSummaryMemory(ConversationSummaryBufferMemory):
                 ):
                     from backend.policy.snapshot_manager import enqueue_snapshot
 
-                    enqueue_snapshot(session_id_local)
+                    try:
+                        # get_short_term_memory에서 설정한 복합 키 "{user_id}:{session_id}" 활용
+                        if (
+                            isinstance(session_id_local, str)
+                            and ":" in session_id_local
+                        ):
+                            _uid, _sid = session_id_local.split(":", 1)
+                            enqueue_snapshot(_uid, _sid)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

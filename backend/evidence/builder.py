@@ -123,6 +123,7 @@ _TTL_SEC = 180.0  # 3분
 @traceable(name="Evidence: build_evidence", run_type="chain", tags=["evidence"])
 async def build_evidence(
     mcp_url: str,
+    user_id: str,
     session_id: str,
     q2: str,
     web_on: bool,
@@ -135,7 +136,9 @@ async def build_evidence(
     반환: (EvidenceBundle, web_ctx_blocks, rag_ctx_blocks)
     """
     # 캐시 키: (session_id, web_on, rag_on, q_hash) — 사용자/옵션 격리
-    key = f"{session_id}:{int(bool(web_on))}:{int(bool(rag_on))}:{_hash_q(q2)}"
+    key = (
+        f"{user_id}:{session_id}:{int(bool(web_on))}:{int(bool(rag_on))}:{_hash_q(q2)}"
+    )
     now = _now()
     if key in _CACHE and (now - _CACHE[key][0]) <= _TTL_SEC:
         ts, bundle, web_ctx, rag_ctx = _CACHE[key]
@@ -231,9 +234,7 @@ async def build_evidence(
 
     if rag_on:
         # 기존 RAG는 문자열 컨텍스트를 반환하므로 동일 방식으로 문서화
-        rag_ctx = retrieve_from_rag(
-            session_id, q2, top_k=3, date_filter=rag_date_filter
-        )
+        rag_ctx = retrieve_from_rag(user_id, q2, top_k=3, date_filter=rag_date_filter)
         # rag_ctx를 web과 동일한 3줄 블록 문자열로 정규화
         # 규칙: 각 문단의 첫 줄을 제목, 둘째 줄을 스니펫, 셋째 줄은 비워두는 대신 가상의 식별자 링크
         # 링크는 추후 소스 경로가 생기면 대체 가능

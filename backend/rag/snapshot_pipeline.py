@@ -14,7 +14,6 @@ from typing import Dict
 from langchain_community.chat_message_histories.redis import RedisChatMessageHistory
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from backend.routing.router_context import user_for_session
 from backend.utils.tracing import traceable
 from backend.utils.logger import safe_log_event
 
@@ -65,7 +64,7 @@ class SnapshotPipeline:
         run_type="chain",
         tags=["memory", "snapshot", "rag"],
     )
-    def update_long_term_memory(self, session_id: str) -> None:
+    def update_long_term_memory(self, user_id: str, session_id: str) -> None:
         """
         장기 메모리 업데이트 (Redis → Milvus)
 
@@ -83,15 +82,19 @@ class SnapshotPipeline:
         9. 상태 업데이트
 
         Args:
-            session_id: 세션 ID
+            user_id: 사용자 ID
+            session_id: 세션 ID (대화 히스토리 로드용)
 
         Example:
             >>> pipeline = SnapshotPipeline()
             >>> pipeline.update_long_term_memory("user123")
         """
-        logger.info(f"[snapshot_pipeline] Start for session_id={session_id}")
-        # 세션→사용자 매핑(영구 스토어는 user_id 기준)
-        mapped_user_id = user_for_session(session_id) or session_id
+        logger.info(
+            f"[snapshot_pipeline] Start for user_id={user_id} session_id={session_id}"
+        )
+        # 유효성 강제: user_id는 필수
+        if not user_id or not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("update_long_term_memory requires non-empty user_id")
 
         # 1. Redis 메시지 로드
         history = RedisChatMessageHistory(
@@ -170,7 +173,7 @@ class SnapshotPipeline:
         from backend.policy.profile_schema import validate_user_profile
 
         state = get_global_state()
-        old_prof = state.get_profile(session_id)
+        old_prof = state.get_profile(user_id)
         old_prof_str = json.dumps(old_prof, ensure_ascii=False)
 
         # JSON 강제 모드
@@ -204,7 +207,7 @@ class SnapshotPipeline:
                 )
                 new_prof = old_prof
 
-            state.set_profile(session_id, new_prof)
+            state.set_profile(user_id, new_prof)
             logger.info(
                 f"[snapshot_pipeline] Profile updated, keys={list(new_prof.keys())}"
             )
@@ -254,10 +257,10 @@ class SnapshotPipeline:
             prof_coll.upsert(
                 [
                     {
-                        "id": f"{mapped_user_id}:profile_json",
+                        "id": f"{user_id}:profile_json",
                         "embedding": prof_emb,
                         "text": json.dumps(new_prof, ensure_ascii=False),
-                        "user_id": mapped_user_id,
+                        "user_id": user_id,
                         # 전체 JSON은 검색 오염을 막기 위해 별도 유형으로 표시
                         "type": "profile_json",
                         "created_at": int(time.time_ns()),
@@ -269,14 +272,14 @@ class SnapshotPipeline:
                 partition_name=part_prof if part_prof else None,
             )
             logger.info(
-                f"[snapshot_pipeline] Upserted profile_json for user_id={mapped_user_id}"
+                f"[snapshot_pipeline] Upserted profile_json for user_id={user_id}"
             )
             # 구조화 로깅(rag.profile_upsert)
             try:
                 safe_log_event(
                     "rag.profile_upsert",
                     {
-                        "user_id": mapped_user_id,
+                        "user_id": user_id,
                         "collection": PROFILE_COLLECTION_NAME,
                         "text_len": len(json.dumps(new_prof, ensure_ascii=False)),
                         "vector_dim": len(prof_emb or []),
@@ -422,7 +425,7 @@ class SnapshotPipeline:
         ym_min = ym_minus_months(now_kst(), self.settings.SNAPSHOT_LOOKBACK_MONTHS)
 
         # 16. 완전중복 체크 (정규화 해시)
-        prev_hash = manager.get_session_value(session_id, "last_norm_hash")
+        prev_hash = manager.get_session_value(user_id, "last_norm_hash")
 
         # 청크별로 중복 검사 및 업서트
         upserted_count = 0
@@ -447,7 +450,7 @@ class SnapshotPipeline:
                 continue
 
             # 근사중복 검색
-            is_dup, dup_sim = near_duplicate_log(mapped_user_id, chunk_emb, ym_min)
+            is_dup, dup_sim = near_duplicate_log(user_id, chunk_emb, ym_min)
 
             # 17. 신규성 게이트: 중복이거나 프로필 delta 부족하면 스킵
             if is_dup or profile_delta_cnt < self.settings.NOVELTY_MIN_PROFILE_DELTA:
@@ -467,7 +470,7 @@ class SnapshotPipeline:
                             "id": chunk_id,
                             "embedding": chunk_emb,
                             "text": chunk_text,
-                            "user_id": mapped_user_id,
+                            "user_id": user_id,
                             "type": "log",
                             "created_at": int(time.time_ns()),
                             "date_start": ymd_start,
@@ -479,7 +482,7 @@ class SnapshotPipeline:
                 )
                 upserted_count += 1
                 logger.info(
-                    f"[snapshot_pipeline] Upserted chunk {chunk_idx} id={chunk_id} user_id={mapped_user_id}"
+                    f"[snapshot_pipeline] Upserted chunk {chunk_idx} id={chunk_id} user_id={user_id}"
                 )
                 # per-chunk는 과도하므로 집계 로그에서 요약
             except Exception as e:
@@ -502,7 +505,7 @@ class SnapshotPipeline:
             safe_log_event(
                 "rag.log_upsert",
                 {
-                    "user_id": mapped_user_id,
+                    "user_id": user_id,
                     "collection": LOG_COLLECTION_NAME,
                     "chunk_count": upserted_count,
                     "skipped_count": skipped_count,
@@ -515,14 +518,14 @@ class SnapshotPipeline:
 
         # 19. 상태 업데이트 (정규화 해시, SimHash)
         try:
-            manager.set_session_value(mapped_user_id, "last_norm_hash", norm_hash)
+            manager.set_session_value(user_id, "last_norm_hash", norm_hash)
 
             # Redis에 SimHash 집합 업데이트
             try:
                 import redis
 
                 r = redis.Redis.from_url(self.settings.REDIS_URL, decode_responses=True)
-                sigkey = f"snap:sig:{mapped_user_id}"
+                sigkey = f"snap:sig:{user_id}"
                 r.sadd(sigkey, str(sig64))
 
                 ttl = int(os.getenv("SNAP_SIG_TTL_SEC", "15552000"))  # 180일
@@ -532,7 +535,9 @@ class SnapshotPipeline:
         except Exception:
             pass
 
-        logger.info(f"[snapshot_pipeline] Completed for session_id={session_id}")
+        logger.info(
+            f"[snapshot_pipeline] Completed for user_id={user_id} session_id={session_id}"
+        )
 
 
 # ===== 싱글톤 인스턴스 =====
@@ -558,12 +563,13 @@ def get_snapshot_pipeline() -> SnapshotPipeline:
 # ===== 호환성을 위한 함수형 인터페이스 =====
 
 
-def update_long_term_memory(session_id: str) -> None:
+def update_long_term_memory(user_id: str, session_id: str) -> None:
     """
     장기 메모리 업데이트 (호환성 래퍼)
 
     Args:
+        user_id: 사용자 ID
         session_id: 세션 ID
     """
     pipeline = get_snapshot_pipeline()
-    pipeline.update_long_term_memory(session_id)
+    pipeline.update_long_term_memory(user_id, session_id)

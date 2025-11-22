@@ -32,6 +32,7 @@ ARCHIVE_EXPIRY_TURNS = int(os.getenv("ARCHIVE_EXPIRY_TURNS", "3"))
 
 
 async def enqueue_pending_evidence(
+    user_id: str,
     session_id: str,
     turn_id: str,
     web_ctx: str,
@@ -84,6 +85,7 @@ async def enqueue_pending_evidence(
 
 
 async def evaluate_with_feedback(
+    user_id: str,
     session_id: str,
     current_turn_id: str,
     feedbacks: List,
@@ -128,7 +130,7 @@ async def evaluate_with_feedback(
                 for fb in (feedbacks or [])
             )
             if has_positive:
-                await _promote_to_active(session_id, pending)
+                await _promote_to_active(user_id, session_id, pending)
                 redis_client.delete(key)
                 log_event(
                     "archive.promoted",
@@ -168,9 +170,10 @@ async def evaluate_with_feedback(
             logger.error(f"[web_evidence_archiver] Evaluate error: {e}")
 
 
-async def _promote_to_active(session_id: str, pending: Dict) -> None:
+async def _promote_to_active(user_id: str, session_id: str, pending: Dict) -> None:
     """pending 증거를 web_archived로 Milvus에 승격"""
     await _archive_immediately(
+        user_id,
         session_id,
         str(pending.get("web_ctx", "")),
         str(pending.get("user_context", "")),
@@ -194,6 +197,7 @@ async def drop_evidence(session_id: str, turn_id: str) -> None:
 
 
 async def archive_web_evidence(
+    user_id: str,
     session_id: str,
     web_ctx: str,
     user_context: str,
@@ -202,10 +206,11 @@ async def archive_web_evidence(
     """
     웹 검색 결과를 즉시 적재하는 기존 로직(회귀/승격 시 사용)
     """
-    await _archive_immediately(session_id, web_ctx, user_context, confidence)
+    await _archive_immediately(user_id, session_id, web_ctx, user_context, confidence)
 
 
 async def _archive_immediately(
+    user_id: str,
     session_id: str,
     web_ctx: str,
     user_context: str,
@@ -251,7 +256,7 @@ async def _archive_immediately(
 
             emb = embed_query_openai(enriched_text)
             now = now_kst()
-            doc_id = f"{session_id}:web_archived:{url_hash}:{int(time.time())}"
+            doc_id = f"{user_id}:web_archived:{url_hash}:{int(time.time())}"
 
             # Milvus 스키마(Log 컬렉션)에 없는 필드는 text에 보존
             safe_text = (
@@ -265,7 +270,7 @@ async def _archive_immediately(
                         "id": doc_id,
                         "embedding": emb,
                         "text": safe_text,
-                        "user_id": session_id,
+                        "user_id": user_id,
                         "type": "web_archived",
                         "created_at": int(time.time_ns()),
                         "date_start": ymd(now),
@@ -303,7 +308,7 @@ async def _archive_immediately(
             safe_log_event(
                 "rag.log_upsert",
                 {
-                    "user_id": session_id,
+                    "user_id": user_id,
                     "collection": "logs",
                     "chunk_count": archived_count,
                     "vector_dim": 0,

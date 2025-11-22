@@ -18,6 +18,7 @@ async def detect_evidence_feedback(
     ai_output: str,
     prev_rag_ctx: str,
     prev_web_ctx: str,
+    user_id: str,
     session_id: str,
     turn_id: str,
 ) -> List[EvidenceFeedback]:
@@ -81,6 +82,7 @@ async def detect_evidence_feedback(
                 evidence_id = hashlib.sha256(snippet.encode()).hexdigest()[:16]
                 out.append(
                     EvidenceFeedback(
+                        user_id=user_id,
                         session_id=session_id,
                         turn_id=turn_id,
                         evidence_type=et,  # type: ignore[arg-type]

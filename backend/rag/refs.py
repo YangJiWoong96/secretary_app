@@ -120,7 +120,7 @@ def _rpush_refs(session_id: str, refs: List[str]):
         pass
 
 
-def upsert_web_ref(session_id: str, title: str, url: str) -> str:
+def upsert_web_ref(user_id: str, title: str, url: str) -> str:
     """
     log_coll에 type="web_ref"로 업서트. text는 "title | url" 형식.
     반환: pointer token (e.g., "web:<url_hash>")
@@ -133,10 +133,10 @@ def upsert_web_ref(session_id: str, title: str, url: str) -> str:
         log_coll.upsert(
             [
                 {
-                    "id": f"{session_id}:web:{url_h}",
+                    "id": f"{user_id}:web:{url_h}",
                     "embedding": emb,
                     "text": text,
-                    "user_id": session_id,
+                    "user_id": user_id,
                     "type": "web_ref",
                     "created_at": int(time.time_ns()),
                     "date_start": 0,
@@ -149,7 +149,7 @@ def upsert_web_ref(session_id: str, title: str, url: str) -> str:
             safe_log_event(
                 "rag.log_upsert",
                 {
-                    "user_id": session_id,
+                    "user_id": user_id,
                     "collection": "logs",
                     "vector_dim": len(emb or []),
                     "chunk_count": 1,
@@ -163,7 +163,7 @@ def upsert_web_ref(session_id: str, title: str, url: str) -> str:
     return f"web:{url_h}"
 
 
-def upsert_rag_ref(session_id: str, block_text: str) -> str:
+def upsert_rag_ref(user_id: str, block_text: str) -> str:
     """
     log_coll에 type="rag_ref"로 업서트. text는 간단 preview 문자열.
     반환: pointer token (e.g., "rag:<content_hash>")
@@ -178,10 +178,10 @@ def upsert_rag_ref(session_id: str, block_text: str) -> str:
         log_coll.upsert(
             [
                 {
-                    "id": f"{session_id}:rag:{h}",
+                    "id": f"{user_id}:rag:{h}",
                     "embedding": emb,
                     "text": preview,
-                    "user_id": session_id,
+                    "user_id": user_id,
                     "type": "rag_ref",
                     "created_at": int(time.time_ns()),
                     "date_start": 0,
@@ -194,7 +194,7 @@ def upsert_rag_ref(session_id: str, block_text: str) -> str:
             safe_log_event(
                 "rag.log_upsert",
                 {
-                    "user_id": session_id,
+                    "user_id": user_id,
                     "collection": "logs",
                     "vector_dim": len(emb or []),
                     "chunk_count": 1,
@@ -208,17 +208,17 @@ def upsert_rag_ref(session_id: str, block_text: str) -> str:
     return f"rag:{h}"
 
 
-def store_refs_from_contexts(session_id: str, web_ctx: str, rag_ctx: str) -> List[str]:
+def store_refs_from_contexts(user_id: str, web_ctx: str, rag_ctx: str) -> List[str]:
     refs: List[str] = []
     # 웹 refs
     for title, url in extract_web_items(web_ctx or ""):
-        refs.append(upsert_web_ref(session_id, title, url))
+        refs.append(upsert_web_ref(user_id, title, url))
     # RAG refs: 블록 단위
     for block in (rag_ctx or "").split("\n\n"):
         bt = block.strip()
         if bt:
-            refs.append(upsert_rag_ref(session_id, bt))
+            refs.append(upsert_rag_ref(user_id, bt))
     # Redis 포인터 저장(경량)
     if refs:
-        _rpush_refs(session_id, refs)
+        _rpush_refs(user_id, refs)
     return refs

@@ -18,6 +18,7 @@ class EvidenceFeedback:
         - 재랭킹 시 trust(d) = Σ(confidence_adjustment × time_decay)
     """
 
+    user_id: str
     session_id: str
     turn_id: str
     evidence_type: Literal["rag", "web"]

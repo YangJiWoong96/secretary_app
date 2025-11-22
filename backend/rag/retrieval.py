@@ -17,7 +17,6 @@ from .config import METRIC
 from .embeddings import embed_query_cached
 from .milvus import ensure_collections
 from .utils import hit_similarity
-from backend.routing.router_context import user_for_session
 
 
 def _parse_domain_from_text(text: str) -> str:
@@ -187,7 +186,7 @@ def _pack_evidence(
 
 @traceable(name="RAG: retrieve_from_rag", run_type="chain", tags=["rag", "retrieval"])
 def retrieve_from_rag(
-    session_id: str,
+    user_id: str,
     query: str,
     top_k: int | None = None,
     date_filter: Optional[Tuple[int, int]] = None,
@@ -225,8 +224,10 @@ def retrieve_from_rag(
     t0 = time.time()
 
     try:
-        # 세션→사용자 매핑: 영구 저장소 검색은 user_id 기준으로만 수행
-        uid = user_for_session(session_id) or session_id
+        # 강제: 검색은 user_id 기준으로만 수행
+        if not user_id or not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("retrieve_from_rag requires non-empty user_id")
+        uid = user_id.strip()
 
         # 신규: 엔티티 기반 쿼리 확장
         expanded_query = query
@@ -554,7 +555,7 @@ import logging as _logging
 async def retrieve_enhanced(
     query: str,
     route: Literal["rag", "web", "weather"],
-    session_id: str,
+    user_id: str,
     top_k: int = 5,
     date_filter: Optional[Tuple[int, int]] = None,
 ) -> str:
@@ -593,7 +594,9 @@ async def retrieve_enhanced(
         _log_event("retrieve_enhanced_start", {"route": route})
 
         # Step 1: 0-hop 캐시 프로브 (web_archived 중심)
-        _uid = user_for_session(session_id) or session_id
+        if not user_id or not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("retrieve_enhanced requires non-empty user_id")
+        _uid = user_id.strip()
         exclude_sites: List[str] = []
         exclude_ids: List[str] = []
         try:

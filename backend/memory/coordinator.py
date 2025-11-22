@@ -192,8 +192,8 @@ class MemoryCoordinator:
                         pass
 
                     try:
-                        # 스냅샷은 세션 히스토리를 사용하되, 적재 user_id는 매핑된 사용자 ID를 사용하도록 내부에서 처리한다.
-                        ltm_snapshot(session_id)
+                        # 스냅샷은 세션 히스토리를 사용하되, 적재는 user_id 기준으로 수행
+                        ltm_snapshot(mapped_user_id, session_id)
                         ltm_triggered = True
                         self._r.set(
                             self._key_last_ltm_seq(mapped_user_id, session_id),
@@ -224,7 +224,7 @@ class MemoryCoordinator:
 
             if should_ltm_final:
                 ltm_triggered = True
-                ltm_snapshot(session_id)
+                ltm_snapshot(mapped_user_id, session_id)
                 self._r.set(
                     self._key_last_ltm_seq(mapped_user_id, session_id), str(cur_seq)
                 )

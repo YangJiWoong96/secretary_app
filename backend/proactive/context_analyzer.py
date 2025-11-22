@@ -56,7 +56,7 @@ class ContextAnalyzerAgent:
 
         t0 = time.time()
         tasks = {
-            "rag": asyncio.create_task(self._fetch_rag(session_id)),
+            "rag": asyncio.create_task(self._fetch_rag(user_id, session_id)),
             "mobile": asyncio.create_task(self._fetch_mobile(user_id)),
             "conversation": asyncio.create_task(self._fetch_conversation(session_id)),
             "memory": asyncio.create_task(self._fetch_mtm(user_id, session_id)),
@@ -179,7 +179,7 @@ class ContextAnalyzerAgent:
     # -----------------------------
     # 병렬 수집
     # -----------------------------
-    async def _fetch_rag(self, session_id: str) -> str:
+    async def _fetch_rag(self, user_id: str, session_id: str) -> str:
         """
         RAG 컨텍스트 수집: 최신 MTM 요약 또는 라우팅 요약을 질의로 사용.
         실패 시 빈 문자열 반환.
@@ -191,9 +191,7 @@ class ContextAnalyzerAgent:
             query = get_latest_mtm_summary(session_id, session_id) or ""
             if not query:
                 return ""
-            ctx = await retrieve_enhanced(
-                query=query, route="rag", session_id=session_id
-            )
+            ctx = await retrieve_enhanced(query=query, route="rag", user_id=user_id)
             return ctx or ""
         except Exception:
             return ""

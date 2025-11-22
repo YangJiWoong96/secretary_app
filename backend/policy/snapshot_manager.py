@@ -207,51 +207,64 @@ class SnapshotManager:
         """
         스냅샷 워커 (백그라운드 무한 루프)
 
-        큐에서 session_id를 가져와 장기 메모리 업데이트를 수행합니다.
+        큐에서 (user_id, session_id)를 가져와 장기 메모리 업데이트를 수행합니다.
 
         Args:
             worker_id: 워커 식별자
         """
         while True:
-            session_id = await self.snapshot_queue.get()
+            item = await self.snapshot_queue.get()
             t0 = time.time()
 
             try:
                 # update_long_term_memory는 동기 함수이므로 스레드로 오프로딩
                 from backend.rag.snapshot_pipeline import update_long_term_memory
 
-                await asyncio.to_thread(update_long_term_memory, session_id)
+                # 강제 형식: (user_id, session_id)
+                if isinstance(item, (tuple, list)) and len(item) == 2:
+                    user_id, session_id = str(item[0]), str(item[1])
+                else:
+                    raise ValueError(
+                        "Snapshot queue item must be (user_id, session_id)"
+                    )
+
+                await asyncio.to_thread(update_long_term_memory, user_id, session_id)
 
                 took = (time.time() - t0) * 1000
                 logger.info(
-                    f"[snapshot:worker-{worker_id}] Done session={session_id} took_ms={took:.1f}"
+                    f"[snapshot:worker-{worker_id}] Done user={user_id} session={session_id} took_ms={took:.1f}"
                 )
             except Exception as e:
                 logger.warning(
-                    f"[snapshot:worker-{worker_id}] Error session={session_id} err={e}"
+                    f"[snapshot:worker-{worker_id}] Error item={item} err={e}"
                 )
             finally:
                 self.snapshot_queue.task_done()
 
-    def enqueue_snapshot(self, session_id: str) -> None:
+    def enqueue_snapshot(self, user_id: str, session_id: str) -> None:
         """
-        스냅샷 큐에 세션 추가
+        스냅샷 큐에 작업 추가
 
         큐가 가득 차면 무시하고 경고 로깅합니다.
 
         Args:
-            session_id: 스냅샷할 세션 ID
+            user_id: 사용자 ID
+            session_id: 세션 ID
         """
         try:
-            self.snapshot_queue.put_nowait(session_id)
+            if not user_id or not isinstance(user_id, str) or not user_id.strip():
+                raise ValueError("enqueue_snapshot requires non-empty user_id")
+            self.snapshot_queue.put_nowait((user_id, session_id))
             logger.info(
-                f"[snapshot:q] Enqueued session={session_id} qsize={self.snapshot_queue.qsize()}"
+                f"[snapshot:q] Enqueued user={user_id} session={session_id} qsize={self.snapshot_queue.qsize()}"
             )
         except asyncio.QueueFull:
-            logger.warning(f"[snapshot:q] Queue full → drop session={session_id}")
+            logger.warning(
+                f"[snapshot:q] Queue full → drop user={user_id} session={session_id}"
+            )
 
     def edge_and_debounce(
-        self, session_id: str, tokens_prev: int, tokens_now: int
+        self, user_id: str, session_id: str, tokens_prev: int, tokens_now: int
     ) -> None:
         """
         에지 트리거 + 디바운스로 스냅샷 타이밍 결정
@@ -259,13 +272,14 @@ class SnapshotManager:
         토큰 수가 임계값을 넘고, 최소 턴 수 및 시간이 경과하면 스냅샷을 예약합니다.
 
         Args:
+            user_id: 사용자 ID
             session_id: 세션 ID
             tokens_prev: 이전 토큰 수
             tokens_now: 현재 토큰 수
 
         Example:
             >>> manager = SnapshotManager()
-            >>> manager.edge_and_debounce("user123", tokens_prev=4000, tokens_now=4600)
+            >>> manager.edge_and_debounce("user123", "sessA", tokens_prev=4000, tokens_now=4600)
             # → 4500 임계값 초과 시 스냅샷 예약
         """
         # 세션 상태 안전 초기화
@@ -290,7 +304,7 @@ class SnapshotManager:
 
         if edge and time_ok and turns_ok:
             # 스냅샷 예약
-            self.enqueue_snapshot(session_id)
+            self.enqueue_snapshot(user_id, session_id)
 
             # Directive 업데이트도 예약
             try:
@@ -459,13 +473,15 @@ async def ensure_workers() -> None:
     await manager.ensure_workers()
 
 
-def enqueue_snapshot(session_id: str) -> None:
+def enqueue_snapshot(user_id: str, session_id: str) -> None:
     """스냅샷 큐에 추가 (호환성 래퍼)"""
     manager = get_snapshot_manager()
-    manager.enqueue_snapshot(session_id)
+    manager.enqueue_snapshot(user_id, session_id)
 
 
-def edge_and_debounce(session_id: str, tokens_prev: int, tokens_now: int) -> None:
+def edge_and_debounce(
+    user_id: str, session_id: str, tokens_prev: int, tokens_now: int
+) -> None:
     """에지 트리거 + 디바운스 (호환성 래퍼)"""
     manager = get_snapshot_manager()
-    manager.edge_and_debounce(session_id, tokens_prev, tokens_now)
+    manager.edge_and_debounce(user_id, session_id, tokens_prev, tokens_now)
