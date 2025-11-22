@@ -1,5 +1,4 @@
 # 보안: 비밀 키와 환경 변수 파일을 Git 추적에서 제외
 .env
 test/
-C:\My_Business/backend/__pycache__/
-C:\My_Business/backend/.ipynb_checkpoints/
+__pycache__/
