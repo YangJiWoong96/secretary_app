@@ -7,17 +7,17 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple, TypedDict, Optional
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 from google.cloud import firestore
-from pymilvus import connections, Collection
-from backend.rag import ensure_collections, get_embeddings
-from backend.rag.embeddings import embed_query_cached
-
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.messages import SystemMessage, HumanMessage
-from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
+from pymilvus import Collection, connections
+
+from backend.rag import ensure_collections
+from backend.rag.embeddings import embed_query_cached
 
 # ======================
 # 환경 변수 / 상수
@@ -47,25 +47,16 @@ LOG_COLLECTION_NAME = (
 MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
 MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 
+
 # ======================
 # 클라이언트 초기화 (지연)
 # ======================
-# Firestore: 앱 부팅 시점에 크레덴셜이 없으면 즉시 실패하므로, 지연 초기화 + 옵셔널 동작
-FIRESTORE_ENABLE = os.getenv("FIRESTORE_ENABLE", "1") == "1"
-_FS: firestore.Client | None = None
+# Firestore 클라이언트 (공용 싱글톤 사용)
+def _fs():
+    """Firestore 클라이언트 반환 (backend.config.clients 공용 싱글톤)"""
+    from backend.config import get_firestore_client
 
-
-def _fs() -> firestore.Client | None:
-    if not FIRESTORE_ENABLE:
-        return None
-    global _FS
-    if _FS is not None:
-        return _FS
-    try:
-        _FS = firestore.Client()
-        return _FS
-    except Exception:
-        return None
+    return get_firestore_client()
 
 
 # Milvus
@@ -77,10 +68,7 @@ llm = ChatOpenAI(
     api_key=OPENAI_API_KEY,
     model=THINKING_MODEL,
 )
-embeddings = OpenAIEmbeddings(
-    openai_api_key=OPENAI_API_KEY,
-    model=EMBEDDING_MODEL,
-)
+# 임베딩은 backend.rag.embeddings의 추상화(자동 백엔드 선택)만 사용
 
 
 # ======================

@@ -1,11 +1,14 @@
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Dict
+from threading import Lock
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class PolicyState:
+    """개인정보/보존/마스킹 정책 상태(전역 기본값)."""
+
     pii_allowed: bool
     consent_long_term: bool
     retention: Dict[str, int]
@@ -14,6 +17,8 @@ class PolicyState:
 
 @dataclass
 class OpsConfig:
+    """운영 파라미터(토큰 한도·캐시·임계 등). 외부 계약 불변."""
+
     timebox_ms: int
     cache_minutes: int
     topk_summaries: int
@@ -25,6 +30,7 @@ class OpsConfig:
 
 
 def get_policy_state() -> PolicyState:
+    """정책 상태 기본값을 환경변수 기반으로 구성해 반환한다."""
     return PolicyState(
         pii_allowed=False,
         consent_long_term=bool(int(os.getenv("CONSENT_LONG_TERM", "1"))),
@@ -45,6 +51,7 @@ def get_policy_state() -> PolicyState:
 
 
 def get_ops_config() -> OpsConfig:
+    """운영 파라미터를 환경변수에서 로드해 반환한다."""
     return OpsConfig(
         timebox_ms=int(os.getenv("TIMEBOX_MS", "1200")),
         cache_minutes=int(os.getenv("CACHE_MINUTES", "3")),
@@ -71,6 +78,7 @@ def get_ops_config() -> OpsConfig:
 
 
 def redact_text(text: str) -> str:
+    """정책에 정의된 패턴 기반으로 텍스트를 마스킹한다(저장 시 적용)."""
     ps = get_policy_state()
     if not ps.redaction.get("apply_on_store", True):
         return text
@@ -81,3 +89,78 @@ def redact_text(text: str) -> str:
         except Exception:
             continue
     return out
+
+
+# ===== 전역 상태 관리 =====
+
+
+class GlobalState:
+    """
+    애플리케이션 전역 상태 관리
+
+    프로필 DB, Bot Profile DB, 세션 상태 등을 중앙에서 관리합니다.
+    스레드 안전하게 구현되어 있습니다.
+    """
+
+    def __init__(self):
+        """GlobalState 초기화"""
+        self._lock = Lock()
+        self._profile_db: Dict[str, Dict] = {}
+
+    @property
+    def profile_db(self) -> Dict[str, Dict]:
+        """사용자 프로필 DB"""
+        return self._profile_db
+
+    def get_profile(self, session_id: str) -> Dict:
+        """
+        사용자 프로필 가져오기
+
+        Args:
+            session_id: 세션 ID
+
+        Returns:
+            Dict: 사용자 프로필 (없으면 빈 딕셔너리)
+        """
+        return self._profile_db.get(session_id, {})
+
+    def set_profile(self, session_id: str, profile: Dict) -> None:
+        """
+        사용자 프로필 설정
+
+        Args:
+            session_id: 세션 ID
+            profile: 프로필 딕셔너리
+        """
+        with self._lock:
+            self._profile_db[session_id] = profile
+
+
+# ===== 싱글톤 인스턴스 =====
+_global_state_instance: Optional[GlobalState] = None
+
+
+def get_global_state() -> GlobalState:
+    """
+    전역 GlobalState 싱글톤 인스턴스 반환
+
+    Returns:
+        GlobalState: 전역 상태 관리자
+    """
+    global _global_state_instance
+
+    if _global_state_instance is None:
+        _global_state_instance = GlobalState()
+
+    return _global_state_instance
+
+
+# 호환성을 위한 전역 변수 (싱글톤 속성으로 리다이렉트)
+PROFILE_DB: Dict[str, Dict] = {}
+
+
+def _init_profile_dbs():
+    """프로필 DB 전역 변수 초기화"""
+    global PROFILE_DB
+    state = get_global_state()
+    PROFILE_DB = state.profile_db

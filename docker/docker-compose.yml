@@ -93,6 +93,8 @@ services:
     build:
       context: ..
       dockerfile: mcp_server/Dockerfile
+    env_file:
+      - ./.env
     environment:
       - CLIENT_ID=${CLIENT_ID}
       - CLIENT_SECRET=${CLIENT_SECRET}
@@ -106,9 +108,35 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # ---------- MeCab test (requirements + mecab-ko/mecab-ko-dic/mecab-python3) ----------
+  mecab-test:
+    container_name: mecab-test
+    build:
+      context: ..
+      dockerfile: docker/mecab/Dockerfile.test
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    ports:
+      - "8888:8888"
+      - "8000:8000"
+    volumes:
+      - ../:/app
+      - ./gcp-service-account-key.json:/app/gcp-service-account-key.json
+    working_dir: /app
+    depends_on:
+      - redis
+      - etcd
+      - minio
+      - milvus
+      - mcp
+    restart: "no"
+
 networks:
   default:
     name: milvus
+    external: true
 
 volumes:
   redis-data:

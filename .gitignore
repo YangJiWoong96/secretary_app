@@ -3,6 +3,10 @@
 .env
 *.json
 venv/
-my_business/models/
-my_business/naver-search-mcp/
-my_business/download_EmbeddingModels.py
+models/
+naver-search-mcp/
+REFACTORING_me_file/
+.cache/
+test/
+uvicorn.log
+evidence/

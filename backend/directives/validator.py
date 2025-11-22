@@ -1,10 +1,9 @@
 import os
-from typing import Dict, Any
+from typing import Any, Dict
 
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from langchain_openai import ChatOpenAI
-
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
 
 THINKING_MODEL = os.getenv("THINKING_MODEL", "gpt-5-thinking")
 

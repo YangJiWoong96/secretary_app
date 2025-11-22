@@ -1,11 +1,15 @@
-import time
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Optional, Tuple
-import tiktoken
 import json
-from backend.rag.embeddings import embed_query_cached
-from backend.memory.stwm import STWMSnapshot
+import time
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
+import tiktoken
+
+from backend.memory.stwm import STWMSnapshot
+from backend.rag.embeddings import (
+    embed_query_cached,
+    embed_query_gemma,
+)
 
 enc = tiktoken.get_encoding("cl100k_base")
 
@@ -70,8 +74,9 @@ class TurnBuffer:
         if len(turns) < 2:
             return 1.0
         # 최근 두 유저/봇 텍스트 평균 임베딩 코사인
-        a = embed_query_cached(turns[-1].text)
-        b = embed_query_cached(turns[-2].text)
+        # 주제 변화 감지: 의미적 일관성 → Gemma 전용
+        a = embed_query_gemma(turns[-1].text)
+        b = embed_query_gemma(turns[-2].text)
         import numpy as np
 
         denom = float((np.linalg.norm(a) * np.linalg.norm(b)) or 1.0)
@@ -99,10 +104,10 @@ class TurnBuffer:
         start_ts = turns[0].ts
         end_ts = turns[-1].ts
         text_block = "\n".join(f"{t.role}: {t.text}" for t in turns)
-        # 최신 RAG 스냅샷 프리뷰 1~2개를 요약 입력에 포함(비동기 MILVUS 조회)
+        # 최신 RAG 스냅샷 프리뷰(0~2개)를 요약 입력에 포함(비동기 MILVUS 조회)
         try:
-            from backend.rag.milvus import ensure_collections as _ens
             from backend.rag.config import METRIC as _METRIC
+            from backend.rag.milvus import ensure_collections as _ens
 
             prof_coll, log_coll = _ens()
             # 최신 2개 로그 샘플
@@ -115,7 +120,15 @@ class TurnBuffer:
             previews = []
             for h in hits or []:
                 t = (h.get("text") or "").splitlines()
-                previews.append(" ".join(t[:3]))
+                snippet = " ".join(t[:3])
+                if len(snippet) > 160:
+                    snippet = snippet[:157].rstrip() + "..."
+                previews.append(snippet)
+            # 동적 제한: 요약 목표 토큰 여유가 적으면 프리뷰 0~1개만 포함
+            # 간단히 길이 기반으로 컷(≤ 220자만 허용)
+            joined = ("\n- ".join(previews)).strip()
+            if len(joined) > 220:
+                previews = previews[:1]
             if previews:
                 text_block = (
                     "[최근 스냅샷 프리뷰]\n- "
@@ -133,13 +146,13 @@ class TurnBuffer:
                 "properties": {
                     "answer_summary": {"type": "string"},
                     "decisions": {"type": "object"},
-                    "commits": {"type": "array"},
+                    "commits": {"type": "array", "items": {"type": "object"}},
                     "updates": {"type": "object"},
-                    "entities": {"type": "array"},
-                    "refs": {"type": "array"},
-                    "safety_flags": {"type": "array"},
+                    "entities": {"type": "array", "items": {"type": "string"}},
+                    "refs": {"type": "array", "items": {"type": "object"}},
+                    "safety_flags": {"type": "array", "items": {"type": "string"}},
                     "quote_snippet": {"type": "string"},
-                    "keyphrases": {"type": "array"},
+                    "keyphrases": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["answer_summary"],
                 "additionalProperties": True,
@@ -161,12 +174,16 @@ class TurnBuffer:
         ]
         try:
             # 순환 의존성 방지를 위해 지연 임포트
-            from backend.app import openai_chat_with_retry, LLM_MODEL
+            from backend.config import get_settings
+            from backend.utils.retry import openai_chat_with_retry
+            from backend.utils.schema_builder import build_json_schema as _bjs
+
+            settings_local = get_settings()
 
             resp = await openai_chat_with_retry(
-                model=LLM_MODEL,
+                model=settings_local.LLM_MODEL,
                 messages=msgs,
-                response_format={"type": "json_schema", "json_schema": schema},
+                response_format=_bjs("TurnSummary", schema, strict=True),
                 max_tokens=380,
                 temperature=0.0,
             )
@@ -185,13 +202,15 @@ class TurnBuffer:
                 "keyphrases": [],
             }
 
-        # 임베딩(512d) 생성: 기존 임베딩을 이용해 512로 축소 후 재정규화
+        # 임베딩 생성: OpenAI 1536차원 그대로 보존 (정보 손실 방지)
         import numpy as np
 
+        # 회차 요약 벡터: 기본 백엔드(OpenAI) 사용, 전체 차원 유지
         v = embed_query_cached(data.get("answer_summary", "") or text_block)
-        v512 = v[:512].astype(float)
-        norm = float(np.linalg.norm(v512) or 1.0)
-        v512 = (v512 / norm).tolist()
+        v_full = np.array(v, dtype=np.float32)
+        norm = float(np.linalg.norm(v_full) or 1.0)
+        v_normalized = (v_full / norm).tolist()
+        emb_dim = len(v_normalized)
 
         sum_id = f"{int(end_ts)}:{len(self._sums.get(session_id, []))}"
         summary = TurnSummary(
@@ -207,7 +226,7 @@ class TurnBuffer:
             safety_flags=data.get("safety_flags", [])[:6],
             quote_snippet=data.get("quote_snippet", "")[:150],
             keyphrases=data.get("keyphrases", [])[:20],
-            emb_dim=512,
+            emb_dim=emb_dim,
             emb_id=sum_id,
             token_cost_est=sum(t.token_est for t in turns),
             extras={"stwm": asdict(stwm) if stwm else None},

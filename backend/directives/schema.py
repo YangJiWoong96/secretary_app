@@ -1,6 +1,6 @@
 # 지시문 JSON 스키마 정의
 
-from typing import Literal, TypedDict, List, Optional, Dict
+from typing import Dict, List, Literal, Optional, TypedDict
 
 Tone = Literal["neutral", "friendly", "professional", "warm"]
 Formality = Literal["banmal", "jondaemal", "neutral"]  # 반말/존댓말/중립
@@ -30,28 +30,21 @@ class DirectiveSnapshot(TypedDict, total=False):
 
 # === Signals: 언어/주제/메타/모바일/정서 분포 등 동적 지표(프롬프트 보조) ===
 class Signals(TypedDict, total=False):
-    # 언어 패턴
-    language: Dict[
+    # --- v2: LLM 기반 동적 신호 ---
+    v: int  # 스키마 버전(현재 2)
+    sentiment: Dict[
         str, float
-    ]  # {"positive_ratio":0~1, "negative_ratio":0~1, "jondaemal_ratio":0~1, ...}
-    # 주제 선호 분포 상위 N
-    topics: List[Dict[str, float]]  # [{"label":"음식","weight":0.22}, ...]
-    # 스타일 특징
-    style: Dict[
-        str, float
-    ]  # {"prefers_short":0/1, "profanity_ratio":0~1, "emotional_intensity":0~1}
-    # 대화 메타데이터
-    meta: Dict[
-        str, float
-    ]  # {"avg_turn_chars":..., "avg_session_turns":..., "repeat_topic_ratio":...}
-    # 감정/정서 분포
-    affect: Dict[
-        str, float
-    ]  # {"positive":..., "negative":..., "anger":..., "joy":..., "sadness":...}
-    # 모바일/캘린더/위치 요약(ingest 결합)
-    mobile: Dict[
-        str, object
-    ]  # {"prime_time":"late_night", "prime_time_share":0.6, ...}
+    ]  # {"positive_ratio":0~1, "negative_ratio":0~1, "neutral_ratio":0~1}
+    topics: List[Dict[str, float]]  # [{"label":"음식","weight":0.22}, ...] (합=1)
+    communication_style: str  # "direct" | "indirect" | "formal" | "casual" | "mixed"
+    emotional_intensity: float  # 0~1
+
+    # --- v1(기존 휴리스틱)과의 하위호환 ---
+    language: Dict[str, float]
+    style: Dict[str, float]
+    meta: Dict[str, float]
+    affect: Dict[str, float]
+    mobile: Dict[str, object]
 
 
 # === Persona: BigFive/MBTI 등 장기 성향(보수적 업데이트) ===

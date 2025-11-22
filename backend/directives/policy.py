@@ -2,18 +2,18 @@
 import time
 from copy import deepcopy
 from typing import Dict, Tuple
+
+from backend.config import get_settings
+
 from .schema import Directives, DirectiveSnapshot
 
 # 업데이트 정책 파라미터 (완만/자연스럽게)
-CONF_THRESH = float(
-    __import__("os").getenv("DIR_CONF_THRESH", "0.55")
-)  # 바꿀 확신도 최소
-COOLDOWN_S = int(__import__("os").getenv("DIR_COOLDOWN_S", "3600"))  # 필드별 쿨다운(초)
-EMA_ALPHA = float(
-    __import__("os").getenv("DIR_EMA_ALPHA", "0.35")
-)  # verbosity 등 숫자 EMA
+_s = get_settings()
+CONF_THRESH = float(getattr(_s, "DIR_CONF_THRESH", 0.55))  # 바꿀 확신도 최소
+COOLDOWN_S = int(getattr(_s, "DIR_COOLDOWN_S", 3600))  # 필드별 쿨다운(초)
+EMA_ALPHA = float(getattr(_s, "DIR_EMA_ALPHA", 0.35))  # verbosity 등 숫자 EMA
 MAX_CHANGES_PER_UPDATE = int(
-    __import__("os").getenv("DIR_MAX_CHANGES", "3")
+    getattr(_s, "DIR_MAX_CHANGES", 3)
 )  # 한 번에 바뀔 필드 수 제한
 
 
@@ -129,11 +129,17 @@ def ema_merge_signals(prev: Dict, cand: Dict, alpha: float = 0.3) -> Dict:
         t.get("label"): t.get("weight", 0.0) for t in (out.get("topics") or [])
     }
     merged_topics: Dict[str, float] = dict(prev_topics)
+    # 단발성/저가중치는 보수 반영(감쇠)
+    try:
+        decay_factor = float(getattr(_s, "SIG_DECAY_FACTOR", 0.5))
+    except Exception:
+        decay_factor = 0.5
     for t in cand_topics:
         lab = t.get("label")
         w = float(t.get("weight", 0.0))
         old = float(merged_topics.get(lab, w))
-        merged_topics[lab] = round((1 - alpha) * old + alpha * w, 3)
+        eff_alpha = alpha * (decay_factor if w < 0.1 else 1.0)
+        merged_topics[lab] = round((1 - eff_alpha) * old + eff_alpha * w, 3)
     top = sorted(merged_topics.items(), key=lambda x: x[1], reverse=True)[:4]
     out["topics"] = [{"label": k, "weight": v} for k, v in top if v > 0]
 

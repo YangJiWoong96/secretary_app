@@ -1,18 +1,50 @@
+# C:\My_Business\backend\rag\refs.py
+import hashlib
+import json
 import os
 import time
-import json
-import hashlib
 from typing import List, Tuple
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import redis
 
+from .embeddings import embed_query_openai as embed_query_cached
 from .milvus import ensure_collections
-from .embeddings import embed_query_cached
-
+from backend.utils.logger import safe_log_event
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-_r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+
+
+# lazy-load Redis client to avoid heavy init at import time
+class _RedisLazy:
+    """Redis 클라이언트 지연 초기화 래퍼.
+
+    - 첫 속성 접근 시점에만 실제 Redis 연결을 생성한다.
+    - 생성 실패 시 AttributeError를 발생시켜 호출부의 기존 try/except에 포착되도록 한다.
+    """
+
+    def __init__(self, url: str):
+        self._url = url
+        self._client = None  # type: ignore[var-annotated]
+
+    def _ensure(self):
+        if self._client is None:
+            try:
+                import redis as _redis  # type: ignore
+
+                self._client = _redis.Redis.from_url(self._url, decode_responses=True)
+            except Exception:
+                self._client = None
+        return self._client
+
+    def __getattr__(self, name: str):
+        client = self._ensure()
+        if client is None:
+            raise AttributeError("Redis client not available")
+        return getattr(client, name)
+
+
+_r = _RedisLazy(REDIS_URL)
 
 
 def _norm_text(s: str) -> str:
@@ -113,6 +145,19 @@ def upsert_web_ref(session_id: str, title: str, url: str) -> str:
                 }
             ]
         )
+        try:
+            safe_log_event(
+                "rag.log_upsert",
+                {
+                    "user_id": session_id,
+                    "collection": "logs",
+                    "vector_dim": len(emb or []),
+                    "chunk_count": 1,
+                    "reason": "web_ref",
+                },
+            )
+        except Exception:
+            pass
     except Exception:
         pass
     return f"web:{url_h}"
@@ -145,6 +190,19 @@ def upsert_rag_ref(session_id: str, block_text: str) -> str:
                 }
             ]
         )
+        try:
+            safe_log_event(
+                "rag.log_upsert",
+                {
+                    "user_id": session_id,
+                    "collection": "logs",
+                    "vector_dim": len(emb or []),
+                    "chunk_count": 1,
+                    "reason": "rag_ref",
+                },
+            )
+        except Exception:
+            pass
     except Exception:
         pass
     return f"rag:{h}"

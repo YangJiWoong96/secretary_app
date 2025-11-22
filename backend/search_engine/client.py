@@ -1,6 +1,8 @@
 import time
 from typing import Any, Dict
+
 import httpx
+from backend.utils.http_client import get_async_client
 
 
 class MCPClient:
@@ -9,15 +11,23 @@ class MCPClient:
         self.timeout = httpx.Timeout(timeout_s)
 
     async def naver_search(
-        self, query: str, display: int = 5, endpoint: str | None = None
+        self,
+        query: str,
+        display: int = 5,
+        endpoint: str | None = None,
+        freshness_days: int | None = None,
     ) -> Dict[str, Any]:
         try:
             t0 = time.time()
-            async with httpx.AsyncClient(timeout=self.timeout) as c:
-                payload = {"query": query, "display": display}
-                if endpoint:
-                    payload["endpoint"] = endpoint
-                r = await c.post(f"{self.base_url}/mcp/search/naver", json=payload)
+            client = get_async_client(self.timeout)
+            payload = {"query": query, "display": display}
+            if endpoint:
+                payload["endpoint"] = endpoint
+            if freshness_days is not None:
+                payload["freshness_days"] = int(freshness_days)
+            r = await client.post(
+                f"{self.base_url}/mcp/search/naver", json=payload, timeout=self.timeout
+            )
             took = (time.time() - t0) * 1000
             if r.status_code != 200:
                 return {
@@ -52,12 +62,13 @@ class NaverDirectClient:
             "webkr": "https://openapi.naver.com/v1/search/webkr.json",
         }.get(kind, "https://openapi.naver.com/v1/search/webkr.json")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as c:
-                r = await c.get(
-                    base,
-                    params={"query": query, "display": display},
-                    headers=self._headers(),
-                )
+            client = get_async_client(self.timeout)
+            r = await client.get(
+                base,
+                params={"query": query, "display": display},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
             data = r.json() if r.status_code == 200 else {}
             return {"status": r.status_code, "data": data}
         except Exception:

@@ -1,28 +1,32 @@
 # LLM 기반 지시문 추출(배치)
 
-from dotenv import load_dotenv, find_dotenv
-import os, json, asyncio
+import asyncio
+import json
+import os
+
+from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))
 
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 from langchain_core.messages import BaseMessage
-from openai import AsyncOpenAI
+from backend.utils.retry import openai_chat_with_retry
+
+from backend.config import get_settings
 from backend.rag import retrieve_from_rag  # optional reuse by callers
-from .schema import DirectiveSnapshot, DirectiveReport
+from backend.utils.logger import get_logger, log_event
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5")
-THINKING_MODEL = os.getenv("THINKING_MODEL", "gpt-5-thinking")
-EXTRACT_TIMEOUT_S = float(os.getenv("DIR_EXTRACT_TIMEOUT_S", "5.0"))
+from .schema import DirectiveReport, DirectiveSnapshot
 
-# 키가 없다면...
-if not OPENAI_API_KEY:
-    raise RuntimeError(
-        "OPENAI_API_KEY not loaded. Check C:\\My_Business\\.env and dotenv loading."
-    )
+from backend.utils.tracing import traceable
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+_settings = get_settings()
+LLM_MODEL = _settings.LLM_MODEL
+THINKING_MODEL = _settings.THINKING_MODEL
+EXTRACT_TIMEOUT_S = float(getattr(_settings, "DIR_EXTRACT_TIMEOUT_S", 5.0))
+
+logger = get_logger("directives")
 
 # 함수콜 강제 JSON 스키마(지시문 전용, 하위호환)
 JSON_SCHEMA = {
@@ -85,6 +89,7 @@ def _msgs_to_text(msgs: List[BaseMessage], cap_chars: int = 16000) -> str:
     return s[-cap_chars:]  # 뒤에서 캡
 
 
+@traceable(name="Directives: extract_directives", run_type="chain", tags=["directives"])
 async def extract_directives(messages: List[BaseMessage]) -> DirectiveSnapshot:
     text = _msgs_to_text(messages)
     try:
@@ -99,140 +104,98 @@ async def extract_directives(messages: List[BaseMessage]) -> DirectiveSnapshot:
         m = (THINKING_MODEL or "").lower()
         supports = any(k in m for k in ("gpt-4o", "gpt-4.1", "4o", "o3", "o4", "gpt-5"))
         if supports:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": JSON_SCHEMA,
-            }
+            from backend.utils.schema_builder import build_json_schema
+
+            kwargs["response_format"] = build_json_schema(
+                "DirectiveSnapshot", JSON_SCHEMA, strict=True
+            )
         resp = await asyncio.wait_for(
-            client.chat.completions.create(**kwargs), timeout=EXTRACT_TIMEOUT_S
+            openai_chat_with_retry(**kwargs), timeout=EXTRACT_TIMEOUT_S
         )
         return json.loads(resp.choices[0].message.content or "{}")
     except Exception:
         return {"directives": {}, "confidence": 0.0, "reasons": ["extract_failed"]}
 
 
-# ---------------------- 휴리스틱 기반 신호 추출 ----------------------
+# ---------------------- 다중 샘플 합의 ----------------------
+def _merge_snapshots(snaps: list[dict]) -> dict:
+    """
+    다중 샘플 스냅샷을 키별로 안정 합성.
+    - 분류형: 최빈값
+    - 정수/실수: 중앙값
+    - 리스트: 교집합(없으면 최빈 리스트)
+    - confidence: 중앙값
+    """
+    import statistics as _stats
+    from collections import Counter as _Counter
 
-_POS_WORDS = [
-    "좋",
-    "행복",
-    "고마",
-    "감사",
-    "기쁘",
-    "재밌",
-    "즐겁",
-    "멋지",
-]
-_NEG_WORDS = [
-    "싫",
-    "나쁘",
-    "불편",
-    "짜증",
-    "화나",
-    "빡치",
-    "우울",
-    "슬프",
-]
-_ANGER = ["화나", "빡치", "열받", "분노"]
-_JOY = ["행복", "기쁘", "즐겁", "재밌", "좋"]
-_SAD = ["우울", "슬프", "눈물", "ㅠ", "ㅜ"]
-_PROFANITY = ["씨발", "좆", "병신", "fuck", "shit"]
+    if not snaps:
+        return {"directives": {}, "confidence": 0.0, "reasons": ["empty_samples"]}
+    ds = [s.get("directives") or {} for s in snaps]
+    keys = set().union(*[d.keys() for d in ds]) if ds else set()
+    out: dict = {}
+    for k in keys:
+        vals = [d.get(k) for d in ds if k in d]
+        if not vals:
+            continue
+        v0 = vals[0]
+        try:
+            if isinstance(v0, (int, float)):
+                out[k] = (
+                    int(_stats.median(vals))
+                    if isinstance(v0, int)
+                    else float(_stats.median(vals))
+                )
+            elif isinstance(v0, list):
+                inter = set(vals[0])
+                for v in vals[1:]:
+                    try:
+                        inter = inter.intersection(set(v))
+                    except Exception:
+                        inter = set()
+                        break
+                if inter:
+                    out[k] = list(inter)[:5]
+                else:
+                    flat = [x for v in vals for x in (v or [])]
+                    out[k] = [x for x, _ in _Counter(flat).most_common(5)]
+            else:
+                out[k] = _Counter(vals).most_common(1)[0][0]
+        except Exception:
+            out[k] = v0
+    confs = [float(s.get("confidence", 0.0)) for s in snaps]
+    try:
+        conf_med = float(_stats.median(confs)) if confs else 0.0
+    except Exception:
+        conf_med = max(confs) if confs else 0.0
+    return {"directives": out, "confidence": conf_med, "reasons": ["consensus"]}
 
-_TOPIC_LEX = {
-    "음식": ["맛집", "식당", "요리", "메뉴", "점심", "저녁", "카페"],
-    "게임": ["게임", "랭크", "플레이", "캐릭터"],
-    "경제": ["주식", "환율", "코스피", "코스닥", "나스닥", "금리", "물가"],
-    "여행": ["여행", "항공", "호텔", "예약", "관광"],
-    "운동": ["운동", "헬스", "러닝", "축구", "야구"],
-    "IT": ["GPU", "AI", "모델", "서버", "프로그래밍", "코딩"],
-    "정치": ["정치", "대선", "국회", "정당"],
-    "문화": ["영화", "음악", "드라마", "공연"],
-}
+
+async def extract_directives_consensus(
+    messages: List[BaseMessage],
+) -> DirectiveSnapshot:
+    n = int(getattr(_settings, "DIR_EXTRACT_SAMPLES", 3))
+    n = max(1, min(5, n))
+    tasks = [asyncio.create_task(extract_directives(messages)) for _ in range(n)]
+    snaps: list[dict] = []
+    for t in tasks:
+        try:
+            snaps.append(await t)
+        except Exception:
+            snaps.append(
+                {"directives": {}, "confidence": 0.0, "reasons": ["extract_failed"]}
+            )
+    try:
+        return _merge_snapshots(snaps)
+    except Exception:
+        # 합의 실패 시 첫 성공 샘플 또는 빈 스냅샷 반환
+        for s in snaps:
+            if s.get("directives"):
+                return s
+        return {"directives": {}, "confidence": 0.0, "reasons": ["consensus_failed"]}
 
 
-def _ratio(dividend: int, divisor: int) -> float:
-    return (dividend / divisor) if divisor > 0 else 0.0
-
-
-def _analyze_signals(messages: List[BaseMessage]) -> Dict[str, Any]:
-    # 사용자 발화만 분석
-    user_texts = [
-        m.content or "" for m in messages if getattr(m, "type", "") == "human"
-    ]
-    if not user_texts:
-        return {}
-    all_text = "\n".join(user_texts)
-    total_chars = sum(len(t) for t in user_texts)
-    turns = len(user_texts)
-
-    # 존댓말/반말 간이 비율
-    jondaemal_hits = sum(t.count("요") + t.count("니다") for t in user_texts)
-    banmal_hits = sum(t.count("야") + t.count("해") for t in user_texts)
-
-    # 감성 단어 카운트
-    pos = sum(sum(1 for w in _POS_WORDS if w in t) for t in user_texts)
-    neg = sum(sum(1 for w in _NEG_WORDS if w in t) for t in user_texts)
-
-    anger = sum(sum(1 for w in _ANGER if w in t) for t in user_texts)
-    joy = sum(sum(1 for w in _JOY if w in t) for t in user_texts)
-    sad = sum(sum(1 for w in _SAD if w in t) for t in user_texts)
-
-    profanity = sum(sum(1 for w in _PROFANITY if w in t) for t in user_texts)
-    excl = all_text.count("!")
-    emoticons = all_text.count("ㅠ") + all_text.count("ㅜ") + all_text.count("ㅋㅋ")
-
-    # 주제 분포(가중치)
-    topic_scores: Dict[str, int] = {k: 0 for k in _TOPIC_LEX}
-    for label, kws in _TOPIC_LEX.items():
-        for kw in kws:
-            topic_scores[label] += all_text.count(kw)
-    # 상위 4개만 정규화
-    top = sorted(topic_scores.items(), key=lambda x: x[1], reverse=True)[:4]
-    total_score = sum(v for _, v in top) or 1
-    topics = [
-        {"label": k, "weight": round(v / total_score, 3)} for k, v in top if v > 0
-    ]
-
-    # 반복 주제(상위 토픽 비중으로 근사)
-    repeat_topic_ratio = max([t["weight"] for t in topics], default=0.0)
-
-    avg_turn_chars = _ratio(total_chars, turns)
-    prefers_short = 1.0 if avg_turn_chars <= 35 else 0.0
-    profanity_ratio = _ratio(profanity, turns)
-    emotional_intensity = min(1.0, _ratio(excl + emoticons, turns))
-
-    language_block = {
-        "positive_ratio": round(_ratio(pos, pos + neg), 3),
-        "negative_ratio": round(_ratio(neg, pos + neg), 3),
-        "jondaemal_ratio": round(
-            _ratio(jondaemal_hits, jondaemal_hits + banmal_hits), 3
-        ),
-    }
-    style_block = {
-        "prefers_short": prefers_short,
-        "profanity_ratio": round(profanity_ratio, 3),
-        "emotional_intensity": round(emotional_intensity, 3),
-    }
-    meta_block = {
-        "avg_turn_chars": round(avg_turn_chars, 1),
-        "avg_session_turns": float(turns),
-        "repeat_topic_ratio": round(repeat_topic_ratio, 3),
-    }
-    affect_block = {
-        "positive": round(_ratio(pos, turns), 3),
-        "negative": round(_ratio(neg, turns), 3),
-        "anger": round(_ratio(anger, turns), 3),
-        "joy": round(_ratio(joy, turns), 3),
-        "sadness": round(_ratio(sad, turns), 3),
-    }
-
-    return {
-        "language": language_block,
-        "topics": topics,
-        "style": style_block,
-        "meta": meta_block,
-        "affect": affect_block,
-    }
+SIGNALS_MODEL = getattr(_settings, "SIGNALS_MODEL", THINKING_MODEL)
 
 
 # ---------------------- 페르소나(LLM 보수적 추정) ----------------------
@@ -271,6 +234,9 @@ PERSONA_SCHEMA = {
 }
 
 
+@traceable(
+    name="Directives: infer_persona", run_type="chain", tags=["directives", "persona"]
+)
 async def _infer_persona(messages: List[BaseMessage]) -> Dict[str, Any]:
     text = _msgs_to_text(messages, cap_chars=12000)
     try:
@@ -280,8 +246,10 @@ async def _infer_persona(messages: List[BaseMessage]) -> Dict[str, Any]:
                 {
                     "role": "system",
                     "content": (
-                        "주어진 대화 텍스트를 바탕으로 Big Five(0~1 스케일)와 선택적 MBTI를 추정하라. "
-                        "근거가 부족하면 MBTI는 null로 두어라. 추측 금지. 한국어 유지 불필요(키만 반환)."
+                        "주어진 대화 텍스트를 바탕으로 장기적 성향(Trait)인 Big Five(0~1 스케일)와 선택적 MBTI를 보수적으로 추정하라. "
+                        "단기 감정/상태는 무시하고, 일관된 언어습관/반복적 선택 근거가 있을 때만 반영하라. "
+                        "근거가 부족하면 MBTI는 null로 두고, Big Five는 0.5±0.1 범위의 보수 추정치를 사용하라(추측 금지). "
+                        "JSON 키만 반환하고 불필요한 텍스트는 포함하지 마라."
                     ),
                 },
                 {"role": "user", "content": text},
@@ -291,12 +259,13 @@ async def _infer_persona(messages: List[BaseMessage]) -> Dict[str, Any]:
         m = (THINKING_MODEL or "").lower()
         supports = any(k in m for k in ("gpt-4o", "gpt-4.1", "4o", "o3", "o4", "gpt-5"))
         if supports:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": PERSONA_SCHEMA,
-            }
+            from backend.utils.schema_builder import build_json_schema
+
+            kwargs["response_format"] = build_json_schema(
+                "Persona", PERSONA_SCHEMA, strict=True
+            )
         resp = await asyncio.wait_for(
-            client.chat.completions.create(**kwargs), timeout=EXTRACT_TIMEOUT_S
+            openai_chat_with_retry(**kwargs), timeout=EXTRACT_TIMEOUT_S
         )
         content = (resp.choices[0].message.content or "").strip()
         return json.loads(content) if content.startswith("{") else {}
@@ -307,22 +276,226 @@ async def _infer_persona(messages: List[BaseMessage]) -> Dict[str, Any]:
 # ---------------------- 통합 리포트 ----------------------
 
 
+def _normalize_sentiment(raw: Dict[str, Any]) -> Dict[str, float]:
+    """감정 비율 합=1 불변식 보장. 결측/비정상값은 균등분배로 복원."""
+    pos = float(raw.get("positive_ratio", 0) or 0)
+    neg = float(raw.get("negative_ratio", 0) or 0)
+    neu = float(raw.get("neutral_ratio", 0) or 0)
+    # 음수 방지 및 NaN 대비
+    pos = max(0.0, pos)
+    neg = max(0.0, neg)
+    neu = max(0.0, neu)
+    s = pos + neg + neu
+    if s <= 0:
+        return {
+            "positive_ratio": 1 / 3,
+            "negative_ratio": 1 / 3,
+            "neutral_ratio": 1 - 2 / 3,
+        }
+    pos /= s
+    neg /= s
+    neu = 1.0 - pos - neg  # 누적 오차 방지
+    return {
+        "positive_ratio": round(pos, 6),
+        "negative_ratio": round(neg, 6),
+        "neutral_ratio": round(neu, 6),
+    }
+
+
+def _normalize_topics(
+    topics: List[Dict[str, Any]], top_k: int = 5
+) -> List[Dict[str, float]]:
+    """토픽 상위 K 정규화(합=1). 잘못된 항목/음수는 제거."""
+    cleaned: List[Dict[str, float]] = []
+    for t in topics or []:
+        label = t.get("label")
+        w = t.get("weight")
+        try:
+            w = float(w)
+        except Exception:
+            continue
+        if not label or w <= 0:
+            continue
+        cleaned.append({"label": str(label), "weight": float(w)})
+    cleaned = cleaned[:top_k]
+    s = sum(t["weight"] for t in cleaned)
+    if s <= 0:
+        return []
+    acc = 0.0
+    result: List[Dict[str, float]] = []
+    for i, t in enumerate(cleaned):
+        if i < len(cleaned) - 1:
+            nw = round(t["weight"] / s, 6)
+            acc += nw
+        else:
+            nw = round(max(0.0, 1.0 - acc), 6)
+        result.append({"label": t["label"], "weight": nw})
+    return result
+
+
+# ---------------------- Signals(LLM) 스키마 ----------------------
+SIGNALS_SCHEMA = {
+    "name": "Signals",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "v": {"type": "integer", "const": 2},
+            "sentiment": {
+                "type": "object",
+                "properties": {
+                    "positive_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+                    "negative_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+                    "neutral_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": ["positive_ratio", "negative_ratio", "neutral_ratio"],
+                "additionalProperties": False,
+            },
+            "topics": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string"},
+                        "weight": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": ["label", "weight"],
+                    "additionalProperties": False,
+                },
+                "maxItems": 5,
+            },
+            "communication_style": {
+                "type": "string",
+                "enum": ["direct", "indirect", "formal", "casual", "mixed"],
+            },
+            "emotional_intensity": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+            },
+        },
+        "required": ["sentiment", "topics", "communication_style"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+
+@traceable(
+    name="Directives: analyze_signals_llm",
+    run_type="chain",
+    tags=["directives", "signals"],
+)
+async def analyze_signals_llm(messages: List[BaseMessage]) -> Dict[str, Any]:
+    """
+    LLM 기반 동적 신호(Signals) 추출
+
+    - sentiment: 긍정/부정/중립 비율(합=1)
+    - topics: Top-5 라벨+가중치(합=1)
+    - communication_style: direct/indirect/formal/casual/mixed
+    - emotional_intensity: 0~1
+    """
+    text = _msgs_to_text(messages, cap_chars=12000)
+    try:
+        sys_prompt = (
+            "너는 대화 분석 전문가다. 아래 대화를 분석하여 다음을 JSON으로 출력하라:\n"
+            "1) sentiment: 사용자 발화의 감정 분포(합=1.0)\n"
+            "2) topics: Top-5 주제(가중치 합=1.0)\n"
+            "3) communication_style: direct/indirect/formal/casual/mixed 중 택1\n"
+            "4) emotional_intensity: 0~1\n\n"
+            "규칙:\n- AI(assistant) 발화는 무시하고 human 발화만 분석\n- 근거 부족 시 중립/낮은 값으로 보수 추정\n- topics 라벨은 구체적으로 기술"
+        )
+
+        kwargs: Dict[str, Any] = {
+            "model": SIGNALS_MODEL,
+            "messages": [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": text},
+            ],
+            "max_tokens": 500,
+            "temperature": 0.0,
+        }
+        m = (SIGNALS_MODEL or "").lower()
+        supports = any(k in m for k in ("gpt-4o", "gpt-4.1", "4o", "o3", "o4", "gpt-5"))
+        if supports:
+            from backend.utils.schema_builder import build_json_schema
+
+            kwargs["response_format"] = build_json_schema(
+                "Signals", SIGNALS_SCHEMA, strict=True
+            )
+
+        resp = await asyncio.wait_for(
+            openai_chat_with_retry(**kwargs), timeout=EXTRACT_TIMEOUT_S
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        data = json.loads(content) if content.startswith("{") else {}
+
+        # 기본값 보정 및 정규화
+        sentiment_raw = data.get("sentiment", {})
+        topics_raw = data.get("topics", [])
+        comm_style = data.get("communication_style", "mixed") or "mixed"
+        intensity = data.get("emotional_intensity", 0.5)
+        try:
+            intensity = float(intensity)
+        except Exception:
+            intensity = 0.5
+        intensity = max(0.0, min(1.0, intensity))
+
+        sentiment = _normalize_sentiment(sentiment_raw)
+        topics = _normalize_topics(topics_raw, top_k=5)
+
+        result = {
+            "v": 2,
+            "sentiment": sentiment,
+            "topics": topics,
+            "communication_style": comm_style,
+            "emotional_intensity": intensity,
+        }
+
+        # 로깅(구조화 + 가독 메시지)
+        log_event("signals_llm", data={"result": result})
+        try:
+            logger.info(f"[signals_llm] extracted: {result}")
+        except Exception:
+            pass
+
+        return result
+    except Exception as e:
+        logger.exception(f"[signals_llm] extraction failed: {repr(e)}")
+        fallback = {
+            "v": 2,
+            "sentiment": {
+                "positive_ratio": 1 / 3,
+                "negative_ratio": 1 / 3,
+                "neutral_ratio": 1 - 2 / 3,
+            },
+            "topics": [],
+            "communication_style": "mixed",
+            "emotional_intensity": 0.5,
+        }
+        log_event("signals_llm_error", data={"error": repr(e)})
+        return fallback
+
+
+@traceable(
+    name="Directives: extract_report", run_type="chain", tags=["directives", "report"]
+)
 async def extract_report(messages: List[BaseMessage]) -> DirectiveReport:
     """
-    지시문(directives): LLM 기반(기존 스키마)
-    신호(signals): 휴리스틱 기반(언어/주제/스타일/메타/감정)
-    페르소나(persona): LLM 보수 추정(BigFive/선택적 MBTI)
+    통합 리포트 생성: Directives + Signals(LLM) + Persona
+
+    - 3개 작업을 병렬로 수행해 대기시간을 최소화한다.
     """
-    # 1) 병렬 실행: 지시문(LLM) + 페르소나(LLM) + 휴리스틱
-    heur = _analyze_signals(messages)
-    d_task = asyncio.create_task(extract_directives(messages))
+    d_task = asyncio.create_task(extract_directives_consensus(messages))
+    s_task = asyncio.create_task(analyze_signals_llm(messages))
     p_task = asyncio.create_task(_infer_persona(messages))
+
     d = await d_task
+    s = await s_task
     p = await p_task
 
     report: DirectiveReport = {
         "directives": d.get("directives") or {},
-        "signals": heur,
+        "signals": s or {},
         "persona": p or {},
         "confidence": float(d.get("confidence", 0.0)),
         "reasons": d.get("reasons", []),

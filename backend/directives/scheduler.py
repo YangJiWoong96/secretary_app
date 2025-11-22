@@ -1,23 +1,26 @@
 # 일일 스케줄러(KST 03:00)로 directives/signals/persona 배치 업데이트 예약
 
-from dotenv import load_dotenv, find_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True))
 
-import os
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List
 
-from .store import get_active_users
 from .pipeline import schedule_directive_update
+from .store import get_active_users
 
 KST = timezone(timedelta(hours=9))
 
 
-DIR_SCHEDULE_ENABLED = os.getenv("DIR_SCHEDULE_ENABLED", "1") == "1"
-DIR_SCHEDULE_HOUR_KST = int(os.getenv("DIR_SCHEDULE_HOUR_KST", "3"))  # 03:00
-DIR_BATCH_DELAY_MS = int(os.getenv("DIR_BATCH_DELAY_MS", "50"))  # 큐 과도 적체 방지
+from backend.config import get_settings
+
+_s = get_settings()
+DIR_SCHEDULE_ENABLED = bool(getattr(_s, "DIR_SCHEDULE_ENABLED", True))
+DIR_SCHEDULE_HOUR_KST = int(getattr(_s, "DIR_SCHEDULE_HOUR_KST", 3))  # 03:00
+DIR_BATCH_DELAY_MS = int(getattr(_s, "DIR_BATCH_DELAY_MS", 50))  # 큐 과도 적체 방지
 
 _sched_started = False
 

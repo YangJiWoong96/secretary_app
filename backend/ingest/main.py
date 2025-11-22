@@ -1,12 +1,12 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-from datetime import datetime
-from dotenv import load_dotenv
-from google.cloud import firestore
-from typing import Dict
 import os
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 import httpx
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from google.cloud import firestore
+from pydantic import BaseModel, Field
 
 # --- 1. 환경 변수 로드 및 Firestore 클라이언트 초기화 ---
 load_dotenv()
@@ -23,6 +23,19 @@ app = FastAPI(
     description="사용자 컨텍스트(위치, 캘린더, 선호도)를 수집하고 통합된 포맷으로 저장하는 API",
     version="1.0.0",
 )
+
+
+# --- 2-1. MeCab 동작 확인용 라우트 ---
+@app.get("/health/mecab")
+def health_mecab():
+    """MeCab 사전/바인딩이 정상 동작하는지 간단 확인"""
+    try:
+        import MeCab
+
+        parsed = MeCab.Tagger("").parse("삼성전자가 서울에 있다")
+        return {"ok": True, "sample": parsed}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # --- 3. Flutter에서 보낼 데이터의 형태 정의 (Pydantic 모델) ---
@@ -81,10 +94,12 @@ async def reverse_geocode(lat: float, lng: float) -> Optional[str]:
     headers = {"Authorization": f"KakaoAK {kakao_api_key}"}
 
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-            result = resp.json()
+        from backend.utils.http_client import get_async_client
+
+        client = get_async_client()
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        result = resp.json()
 
         documents = result.get("documents", [])
         if documents:
@@ -181,7 +196,7 @@ async def receive_calendar_events(payload: CalendarReceivePayload):
 
 @app.post("/api/v1/preferences", tags=["Unified Events"])
 async def receive_preferences(payload: PreferenceReceivePayload):
-    """(통합) 사용자의 선호도 정보를 받아 Firestore에 저장"""
+    """(통합) 사용자의 선호도 정보를 받아 Firestore 및 Milvus Profile Collection에 저장"""
     try:
         # ① 통합 데이터 포맷으로 변환
         data_to_store = {
@@ -193,11 +208,43 @@ async def receive_preferences(payload: PreferenceReceivePayload):
 
         # ② Firestore에 저장
         save_to_firestore(payload.userId, data_to_store)
+
+        # ③ Milvus Profile Collection에 explicit로 저장
+        try:
+            import asyncio as _aio
+
+            from backend.rag.profile_writer import get_profile_writer
+
+            writer = get_profile_writer()
+
+            tasks = []
+            for key_path, value in (payload.preferences or {}).items():
+                norm_key = writer._normalize_key(str(key_path))
+                tasks.append(
+                    writer._upsert_chunk(
+                        user_id=payload.userId,
+                        category="preferences",
+                        key_path=str(key_path),
+                        norm_key=norm_key,
+                        value=value,
+                        source="explicit",
+                        status="active",
+                        confidence=1.0,
+                        evidence_turn_ids=[],
+                        extras=None,
+                    )
+                )
+
+            if tasks:
+                await _aio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"❌ Milvus explicit 저장 실패: {e}")
+
         return {
             "status": "success",
             "dataType": "PREFERENCE_UPDATE",
             "data": data_to_store,
+            "milvus_stored": len(payload.preferences or {}),
         }
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"서버 에러: {e}")

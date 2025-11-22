@@ -1,0 +1,77 @@
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    LC_ALL=C.UTF-8 \
+    LANG=C.UTF-8
+
+# MeCab이 참조할 전역 설정 파일 경로 지정
+ENV MECABRC=/usr/local/etc/mecabrc
+
+# 1) OS 패키지 설치 (Debian slim): 빌드 도구 + MeCab 런타임
+# - 주의: mecab-ko / mecab-ko-dic는 소스에서 빌드/설치합니다
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential autoconf automake libtool pkg-config autoconf-archive gettext \
+    libncurses5-dev libncursesw5-dev perl \
+    mecab libmecab-dev mecab-utils \
+    git curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 2) requirements.txt 우선 설치 (의존성 검증 목적)
+COPY requirements.txt /tmp/requirements.txt
+
+# PyTorch CPU 전용 wheel 인덱스
+ENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
+
+RUN python -m pip install --upgrade pip \
+    && pip install -r /tmp/requirements.txt \
+    && pip check
+
+# 3) Python MeCab 바인딩 설치
+RUN pip install mecab-python3 \
+    && pip check
+
+# 3-1) mecab-ko / mecab-ko-dic 소스 빌드 및 설치
+# - 설치 경로는 기본적으로 /usr/local 아래에 위치합니다
+# - 설치 후 ldconfig로 런타임에서 라이브러리를 찾을 수 있도록 반영합니다
+WORKDIR /tmp
+RUN set -eux; \
+    git clone --depth 1 https://bitbucket.org/eunjeon/mecab-ko.git; \
+    cd mecab-ko; \
+    ( [ -x ./autogen.sh ] && ./autogen.sh || autoreconf -i ); \
+    ./configure; \
+    make -j"$(nproc)"; \
+    make install; \
+    cd /tmp; \
+    curl -L -o mecab-ko-dic.tar.gz https://bitbucket.org/eunjeon/mecab-ko-dic/downloads/mecab-ko-dic-2.1.1-20180720.tar.gz; \
+    tar xvf mecab-ko-dic.tar.gz; \
+    cd mecab-ko-dic-2.1.1-20180720; \
+    autoreconf -i || true; \
+    ./configure; \
+    make -j"$(nproc)"; \
+    make install; \
+    echo "/usr/local/lib" > /etc/ld.so.conf.d/usr-local-lib.conf; \
+    ldconfig; \
+    mecab -D | cat; \
+    rm -rf /tmp/mecab-ko /tmp/mecab-ko-dic-2.1.1-20180720 /tmp/mecab-ko-dic.tar.gz
+
+# 3-2) mecabrc 설정 (소스 설치된 한국어 사전 경로 지정) + 호환 링크
+RUN set -eux; \
+    mkdir -p /usr/local/etc /etc /usr/lib/mecab/dic /usr/local/lib/mecab/dic; \
+    printf 'dicdir = %s\n' '/usr/local/lib/mecab/dic/mecab-ko-dic' | tee /usr/local/etc/mecabrc > /etc/mecabrc; \
+    ln -sfn /usr/local/lib/mecab/dic/mecab-ko-dic /usr/lib/mecab/dic/mecab-ko-dic; \
+    mecab -D | cat
+
+# JupyterLab 설치
+RUN pip install jupyterlab
+
+# 컨테이너 실행 시 Jupyter 띄우기
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--allow-root", "--NotebookApp.token="]
+
+# # 4) 애플리케이션 코드 복사 및 서비스 실행 (FastAPI)
+# COPY . /app
+# EXPOSE 8000
+# CMD ["uvicorn", "backend.ingest.main:app", "--host", "0.0.0.0", "--port", "8000"]

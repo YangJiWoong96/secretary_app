@@ -1,3 +1,4 @@
+# C:\My_Business\backend\rag\config.py
 import os
 from pathlib import Path
 
@@ -6,6 +7,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Embedding backend: "openai" | "gemma" (sentence-transformers)
+# RAG 벡터 검색/저장은 OpenAI로 일관 운영. 기능별 백엔드 스위칭은 호출부에서 강제 지정.
 EMBEDDING_BACKEND = os.getenv("EMBEDDING_BACKEND", "openai").lower()
 
 # Local Gemma/Sentence-Transformers model path (for EMBEDDING_BACKEND="gemma")

@@ -1,7 +1,11 @@
 # backend/proactive/notifier.py
-import os, json, requests, datetime as dt
-from google.oauth2 import service_account
+import datetime as dt
+import json
+import os
+
+import requests
 from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 
 PROJECT_ID = os.getenv("GCP_PROJECT_ID")  # ex) my-firebase-proj
 SA_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # service-account.json

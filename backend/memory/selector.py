@@ -1,9 +1,12 @@
-from typing import List, Dict, Any, Tuple
-from dataclasses import dataclass
-from rank_bm25 import BM25Okapi
-import numpy as np
 import re
-from backend.rag.embeddings import embed_query_cached
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+from rank_bm25 import BM25Okapi
+
+from backend.rag.embeddings import embed_query_cached, embed_query_openai
+
 from .turns import TurnSummary
 
 
@@ -44,11 +47,12 @@ def select_summaries(
     bm_scores = bm25.get_scores(q_tokens)
     # 상위 N 후보
     idxs = list(np.argsort(-np.array(bm_scores))[:topk_bm25])
-    qv = embed_query_cached(query)
+    # 회차 요약 선택: 하이브리드 검색(키워드+임베딩). 임베딩은 OpenAI 사용 권장.
+    qv = embed_query_openai(query)
     # 코사인 계산
     final: List[Tuple[float, int]] = []
     for i in idxs:
-        dv = embed_query_cached(candidates[i].answer_summary)
+        dv = embed_query_openai(candidates[i].answer_summary)
         sim = _cosine(qv, dv)
         score = bm25_weight * float(bm_scores[i]) + emb_weight * sim
         final.append((score, i))
